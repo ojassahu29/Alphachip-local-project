@@ -1,0 +1,224 @@
+# ============================================================================
+# Circuit Training (AlphaChip) - GPU-Enabled Dockerfile
+# ============================================================================
+# Multi-stage build:
+#   Stage 1 (builder): Builds DREAMPlace from source
+#   Stage 2 (runtime): Final Circuit Training environment with GPU support
+#
+# Build (~20-40 min first time):
+#   docker build --tag circuit_training:gpu -f Dockerfile.gpu .
+#
+# Run (GPU):
+#   docker run --gpus all -it --rm -v %cd%\circuit_training:/workspace --workdir /workspace circuit_training:gpu bash
+# ============================================================================
+
+# ===========================
+# Stage 1: Build DREAMPlace
+# ===========================
+ARG base_image="nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04"
+FROM ${base_image} AS dreamplace-builder
+
+ARG python_version="python3.9"
+ARG DEBIAN_FRONTEND=noninteractive
+ENV TZ=America/Los_Angeles
+
+# System deps for building DREAMPlace
+RUN apt-get -o Acquire::Retries=3 -y update && \
+    apt-get -o Acquire::Retries=3 -y install -y --no-install-recommends \
+        software-properties-common \
+        curl wget git \
+        build-essential \
+        aria2 \
+        libpng-dev \
+        lsof \
+        pkg-config \
+        libfreetype6-dev \
+        libhdf5-serial-dev \
+        libzmq3-dev \
+        libcairo2-dev \
+        libboost-all-dev
+
+# Add Python PPA and install Python 3.9
+RUN add-apt-repository ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ${python_version}-dev \
+        ${python_version}-distutils
+
+# Install pip
+RUN curl -O https://bootstrap.pypa.io/get-pip.py && \
+    ${python_version} get-pip.py && \
+    rm get-pip.py
+
+# Fix flex/bison for DREAMPlace cmake
+RUN apt-get -y install flex && \
+    apt-get -y remove flex && \
+    apt-get -y install flex && \
+    apt-get -y install bison
+
+# Install cmake 3.21
+RUN wget https://cmake.org/files/v3.21/cmake-3.21.0-linux-x86_64.sh && \
+    mkdir -p /opt/cmake && \
+    sh cmake-3.21.0-linux-x86_64.sh --prefix=/opt/cmake --skip-license && \
+    ln -s /opt/cmake/bin/cmake /usr/local/bin/cmake && \
+    rm cmake-3.21.0-linux-x86_64.sh
+
+# Python dependencies for DREAMPlace build
+RUN ${python_version} -mpip install \
+        pyunpack>=0.1.2 \
+        patool>=1.12 \
+        matplotlib>=2.2.2 \
+        cairocffi>=0.9.0 \
+        pkgconfig>=1.4.0 \
+        setuptools>=39.1.0 \
+        scipy>=1.1.0 \
+        numpy>=1.15.4 \
+        torch==1.13.1 \
+        shapely>=1.7.0
+
+# Clone DREAMPlace from the circuit_training branch
+RUN git clone --recursive --branch circuit_training \
+    https://github.com/esonghori/DREAMPlace.git /dreamplace_src && \
+    cd /dreamplace_src/thirdparty/pybind11 && \
+    git pull https://github.com/pybind/pybind11.git && \
+    git checkout v2.10.3
+
+# Build DREAMPlace (CPU-only build — DREAMPlace GPU not needed for Circuit Training)
+RUN mkdir -p /dreamplace_src/build && \
+    cd /dreamplace_src/build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=/dreamplace_install -DPYTHON_EXECUTABLE=$(which ${python_version}) && \
+    make -j$(nproc) && \
+    make install
+
+# Package the built DREAMPlace
+RUN tar -czf /dreamplace_built.tar.gz -C /dreamplace_install .
+
+
+# ===========================
+# Stage 2: Runtime
+# ===========================
+FROM ${base_image}
+
+LABEL maintainer="Circuit Training GPU Setup"
+
+ARG base_image="nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04"
+ARG python_version="python3.9"
+ARG tf_agents_version="tf-agents[reverb]"
+ARG placement_cost_binary="plc_wrapper_main_0.0.4"
+ARG APT_COMMAND="apt-get -o Acquire::Retries=3 -y"
+
+ARG DEBIAN_FRONTEND=noninteractive
+ENV TZ=America/Los_Angeles
+
+# Use legacy Keras 2 (required by Circuit Training)
+ENV TF_USE_LEGACY_KERAS=1
+
+# ============================================================================
+# 1. System packages
+# ============================================================================
+RUN ${APT_COMMAND} update && ${APT_COMMAND} install -y --no-install-recommends \
+        software-properties-common \
+        curl \
+        wget \
+        git \
+        tmux \
+        vim \
+        less
+
+# Add deadsnakes PPA and install Python 3.9
+RUN add-apt-repository ppa:deadsnakes/ppa
+RUN ${APT_COMMAND} update && ${APT_COMMAND} install -y --no-install-recommends \
+        ${python_version}-dev \
+        ${python_version}-distutils
+
+# ============================================================================
+# 2. Placement Cost Binary
+# ============================================================================
+RUN curl https://storage.googleapis.com/rl-infra-public/circuit-training/placement_cost/${placement_cost_binary} \
+     -o /usr/local/bin/plc_wrapper_main && \
+    chmod 555 /usr/local/bin/plc_wrapper_main
+
+# ============================================================================
+# 3. pip
+# ============================================================================
+RUN curl -O https://bootstrap.pypa.io/get-pip.py && \
+    ${python_version} get-pip.py && \
+    rm get-pip.py
+
+# ============================================================================
+# 4. DREAMPlace system dependencies
+# ============================================================================
+RUN apt-get update && \
+    apt-get install -y \
+        flex \
+        libcairo2-dev \
+        libboost-all-dev && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# ============================================================================
+# 5. DREAMPlace Python dependencies
+# ============================================================================
+RUN ${python_version} -mpip install \
+        pyunpack>=0.1.2 \
+        patool>=1.12 \
+        timeout-decorator>=0.5.0 \
+        matplotlib>=2.2.2 \
+        cairocffi>=0.9.0 \
+        pkgconfig>=1.4.0 \
+        setuptools>=39.1.0 \
+        scipy>=1.1.0 \
+        numpy>=1.15.4 \
+        torch==1.13.1 \
+        shapely>=1.7.0
+
+# ============================================================================
+# 6. TF-Agents (includes TensorFlow 2.x and Reverb)
+# ============================================================================
+RUN ${python_version} -mpip --no-cache-dir install \
+        ${tf_agents_version} \
+        tf-keras \
+        sortedcontainers \
+        tox \
+        pytest
+
+# ============================================================================
+# 7. Fix cuDNN for TensorFlow GPU compatibility
+# ============================================================================
+RUN case $base_image in \
+       *"nvidia"*) ${python_version} -mpip install --force-reinstall nvidia-cudnn-cu11~=8.6.0.0 ;; \
+       *         ) echo "Skip cuDNN reinstall - CPU only image" ;; \
+    esac
+
+# ============================================================================
+# 8. DREAMPlace (built from source in Stage 1)
+# ============================================================================
+COPY --from=dreamplace-builder /dreamplace_built.tar.gz /tmp/dreamplace.tar.gz
+RUN mkdir -p /dreamplace && \
+    tar xzf /tmp/dreamplace.tar.gz -C /dreamplace/ && \
+    rm /tmp/dreamplace.tar.gz
+
+# DREAMPlace PYTHONPATH
+ENV PYTHONPATH="${PYTHONPATH}:/dreamplace:/dreamplace/dreamplace"
+
+# ============================================================================
+# 9. Verify installed packages (logged during build)
+# ============================================================================
+RUN ${python_version} -m pip freeze
+
+# ============================================================================
+# 10. GPU verification helper
+# ============================================================================
+RUN echo '#!/bin/bash\n\
+echo "=== NVIDIA GPU Status ==="\n\
+nvidia-smi\n\
+echo ""\n\
+echo "=== TensorFlow GPU Devices ==="\n\
+python3.9 -c "import tensorflow as tf; gpus = tf.config.list_physical_devices(\"GPU\"); print(f\"Found {len(gpus)} GPU(s): {gpus}\")" 2>/dev/null\n\
+echo ""\n\
+echo "=== Environment Ready ==="\n\
+' > /usr/local/bin/check_gpu.sh && chmod +x /usr/local/bin/check_gpu.sh
+
+WORKDIR /workspace
+
+CMD ["/bin/bash"]
