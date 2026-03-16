@@ -1,0 +1,90 @@
+# ============================================================================
+# Step 1: Build DREAMPlace from source
+# ============================================================================
+# This Dockerfile builds DREAMPlace and outputs the built binary as a tarball.
+#
+# Build:
+#   docker build --tag dreamplace:builder -f Dockerfile.dreamplace .
+#
+# Extract built DREAMPlace:
+#   docker run --rm dreamplace:builder cat /dreamplace_built.tar.gz > deps/dreamplace_built.tar.gz
+# ============================================================================
+
+FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
+
+ARG python_version="python3.9"
+ARG DEBIAN_FRONTEND=noninteractive
+ENV TZ=America/Los_Angeles
+
+# System deps for building DREAMPlace
+RUN apt-get -o Acquire::Retries=3 -y update && \
+    apt-get -o Acquire::Retries=3 -y install -y --no-install-recommends \
+        software-properties-common \
+        curl wget git \
+        build-essential \
+        aria2 \
+        libpng-dev \
+        lsof \
+        pkg-config \
+        libfreetype6-dev \
+        libhdf5-serial-dev \
+        libzmq3-dev \
+        libcairo2-dev \
+        libboost-all-dev
+
+# Add Python PPA and install Python 3.9
+RUN add-apt-repository ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ${python_version}-dev \
+        ${python_version}-distutils
+
+# Install pip
+RUN curl -O https://bootstrap.pypa.io/get-pip.py && \
+    ${python_version} get-pip.py && \
+    rm get-pip.py
+
+# Fix flex/bison for DREAMPlace cmake
+RUN apt-get -y install flex && \
+    apt-get -y remove flex && \
+    apt-get -y install flex && \
+    apt-get -y install bison
+
+# Install cmake 3.21
+RUN wget https://cmake.org/files/v3.21/cmake-3.21.0-linux-x86_64.sh && \
+    mkdir -p /opt/cmake && \
+    sh cmake-3.21.0-linux-x86_64.sh --prefix=/opt/cmake --skip-license && \
+    ln -s /opt/cmake/bin/cmake /usr/local/bin/cmake && \
+    rm cmake-3.21.0-linux-x86_64.sh
+
+# Python dependencies for DREAMPlace build
+RUN ${python_version} -mpip install \
+        pyunpack>=0.1.2 \
+        patool>=1.12 \
+        matplotlib>=2.2.2 \
+        cairocffi>=0.9.0 \
+        pkgconfig>=1.4.0 \
+        setuptools>=39.1.0 \
+        scipy>=1.1.0 \
+        numpy>=1.15.4 \
+        torch==1.13.1 \
+        shapely>=1.7.0
+
+# Clone DREAMPlace from the circuit_training branch
+RUN git clone --recursive --branch circuit_training \
+    https://github.com/esonghori/DREAMPlace.git /dreamplace_src && \
+    cd /dreamplace_src/thirdparty/pybind11 && \
+    git pull https://github.com/pybind/pybind11.git && \
+    git checkout v2.10.3
+
+# Build DREAMPlace
+RUN mkdir -p /dreamplace_src/build && \
+    cd /dreamplace_src/build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=/dreamplace_install -DPYTHON_EXECUTABLE=$(which ${python_version}) && \
+    make -j$(nproc) && \
+    make install
+
+# Package the built DREAMPlace
+RUN tar -czf /dreamplace_built.tar.gz -C /dreamplace_install .
+
+CMD ["echo", "DREAMPlace built successfully. Extract with: docker run --rm dreamplace:builder cat /dreamplace_built.tar.gz > dreamplace_built.tar.gz"]

@@ -1,0 +1,9 @@
+DockerDesktopWSL/
+deps/*.tar.gz
+*.vhdx
+*.vhd
+*.iso
+*.img
+node_modules/
+__pycache__/
+.DS_Store
