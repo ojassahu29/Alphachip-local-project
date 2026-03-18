@@ -1,0 +1,53 @@
+# AlphaChip-Lite default training configuration
+# -----------------------------------------------
+
+# --- Device ---
+device: "auto"          # "auto" | "cuda" | "cpu"
+
+# --- Netlist ---
+netlist_path: "alphachip_lite/netlist/toy_netlist.json"
+
+# --- Environment ---
+env:
+  ordering: "curriculum"      # "size" | "connectivity" | "curriculum"
+  reward:
+    wl_weight: 1.0
+    overlap_weight: 1.5
+    boundary_weight: 0.5
+    congestion_weight: 0.1
+    normalise_wl: 1000.0
+
+# --- Model ---
+model:
+  grid_embed_dim: 128
+  graph_embed_dim: 128
+  macro_embed_dim: 64
+  hidden_dim: 256
+  gcn_hidden_dim: 64
+  n_gcn_layers: 2
+  dropout: 0.1
+
+# --- PPO ---
+ppo:
+  lr: 3.0e-4
+  clip_eps: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.01
+  max_grad_norm: 0.5
+  n_epochs: 4
+  batch_size: 64
+  gamma: 0.99
+  gae_lambda: 0.95
+
+# --- Training ---
+training:
+  num_episodes: 500
+  rollout_steps: 256        # transitions per rollout before PPO update
+  log_interval: 10
+  save_interval: 100
+  output_dir: "outputs"
+
+# --- Evaluation ---
+eval:
+  num_episodes: 20
+  deterministic: true
